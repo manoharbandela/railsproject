@@ -1,0 +1,58 @@
+### launching server 
+---
+  - name: launching name
+    hosts: localhost
+    connection: local
+    tasks:
+      - name: lauch
+        ec2:
+          key_name: ansible
+          region: us-east-2
+          instance_type: t2.micro
+          image: ami-0d5d9d301c853a04a
+          group: default
+          vpc_subnet_id: subnet-42c7100e
+          assign_public_ip: yes
+          count: 3
+          aws_access_key: AKIAYCG7V7OREG5UOGGE
+          aws_secret_key: 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
+
+
+
+### install of full nginx
+---
+- hosts: nginx1
+  tasks:
+    - name: ensure nginx is at the latest version
+      apt: name=nginx state=latest
+    - name: start nginx
+      service:
+          name: nginx
+          state: started
+      become: yes
+    - name: copy the nginx config file and restart nginx
+      copy:
+        src: /opt/rubyrail.conf
+        dest: /etc/nginx/sites-available/rubyrail.conf
+      become: yes
+    - name: create symlink
+      file:
+        src: /etc/nginx/sites-available/rubyrail.conf
+        dest: /etc/nginx/sites-enabled/rubyrail.conf
+        state: link
+    - name: restrart nginx
+      service:
+        name: nginx
+        state: restarted
+      become: yes
+
+### nginx -passeger install 
+
+---
+- hosts: nginx1
+  tasks:
+   - name: Install packages
+     apt: name={{ item }} state=present
+     with_items:
+      - nginx-extras
+      - passenger
