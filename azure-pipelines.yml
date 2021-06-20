@@ -1,19 +1,135 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
-
+# Build Docker image for this app using Azure Pipelines
+# https://docs.microsoft.com/azure/devops/pipelines/languages/docker?view=vsts
+variables:
+    imageName: '$(Build.BuildId)'
+    acrRepoName: ellisdonacrnonprod
+    acrRepoNameMaster: ellisdonacrmaster
 trigger:
-- master
+  branches:
+    include:
+     - develop
+     - master
+pr:
+  branches:
+    include:
+     - develop
+     - master
+stages:
+- stage: Build
+  jobs:
+  - job: RUN_Build
+    variables:
+    - group: Build-Varaible
+    pool:
+      vmImage: 'Ubuntu 16.04'
+    steps:
+    - script: |
+        docker build -t $(imageName)-pr .
+      displayName: 'docker build - Pull Request'
+      condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+      continueOnError: false
+    - script: |
+        docker build -t $(acrRepoName).azurecr.io/$(imageName) .
+      displayName: 'docker build - develop'
+      condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+      continueOnError: false   
+    - script: |
+        docker tag $(acrRepoName).azurecr.io/$(imageName) gcr.io/$(project-ID)/$(imageName)
+        docker login -u _json_key -p "$GCP_ACCOUNT_JSON_2" https://gcr.io
+        docker push gcr.io/$(project-ID)/$(imageName)
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+      displayName: 'conditonal docker push & retag image to GCR - develop' 
+      continueOnError: false   
+      env:
+        pswd: $(dockerPassword)
+        GCP_ACCOUNT_JSON_2: $(GCP_ACCOUNT_JSON)
+    - script: |
+        docker build -t $(acrRepoNameMaster).azurecr.io/$(imageName) .
+      displayName: 'docker build - master' 
+      condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+      continueOnError: false 
+    - script: |
+        docker login -u $(acrRepoNameMaster) -p $pswdMaster $(acrRepoNameMaster).azurecr.io
+        docker push $(acrRepoNameMaster).azurecr.io/$(imageName)
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+      displayName: 'conditonal docker push image to ACR - master' 
+      continueOnError: false   
+      env:
+        pswdMaster: $(dockerPasswordMaster)
+    - script: |
+        docker tag $(acrRepoNameMaster).azurecr.io/$(imageName) gcr.io/$(project-ID-prod)/$(imageName)
+        docker login -u _json_key -p "$GCP_ACCOUNT_JSON_2" https://gcr.io
+        docker push gcr.io/$(project-ID-prod)/$(imageName)
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+      displayName: 'conditonal docker push & retag image to GCR - master' 
+      continueOnError: false   
+      env:
+        pswd: $(dockerPassword)
+        GCP_ACCOUNT_JSON_2: $(GCP_ACCOUNT_JSON)
+    - task: HelmInstaller@0
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/master')))
+      inputs:
+        helmVersion: '2.10.0'
+        checkLatestHelmVersion: false
+        installKubectl: true 
+        kubectlVersion: '1.8.9'
+        checkLatestKubectl: false
 
-pool:
-  vmImage: 'ubuntu-latest'
-
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
-
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+    - script: |
+        helm package --destination $(Build.ArtifactStagingDirectory) $(Build.SourcesDirectory)/charts/forecasterux 
+      displayName: 'Create Helm Package'
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/master')))
+    - task: PublishBuildArtifacts@1
+      condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), or(eq(variables['Build.SourceBranch'], 'refs/heads/develop'), eq(variables['Build.SourceBranch'], 'refs/heads/master')))
+      displayName: 'Publish Artifacts'
+      inputs:
+        pathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        artifactName: 'drop' 
+        publishLocation: 'container'     
+- stage: 'Deploy_to_IST'
+  variables:
+  - group: Build-Varaible
+  - group: ingress
+  - group: IST-MongoDB
+  - group: IST-RabbitMQ
+  - group: Podspec
+  - group: IST-ENV
+  - name: ImageRepo
+    value: 'gcr.io/radix-shared-inf/statusupdates'
+  condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+  dependsOn: Build
+  
+  jobs:
+  - job: Deploying_IST
+    pool:
+      vmImage: 'vs2017-win2016'
+    steps:
+    # Download Build Artifacts
+    # Download Build Artifacts
+    - task: DownloadBuildArtifacts@0
+      inputs:
+        artifactName: 'drop'
+    - task: HelmInstaller@0
+      displayName: 'Install Helm 3.3.1'
+      inputs:
+        helmVersion: 3.3.1
+        checkLatestHelmVersion: false
+    - task: HelmDeploy@0
+      displayName: 'helm init'
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceConnection: 'ist-gke-service'
+        namespace: default
+        command: init
+        upgradeTiller: false
+    - task: HelmDeploy@0
+      displayName: 'Deploy Helm Charts'
+      inputs:
+        connectionType: 'Kubernetes Service Connection'
+        kubernetesServiceConnection: 'ist-ux-service'
+        namespace: default
+        command: upgrade
+        chartType: FilePath
+        chartPath: '$(System.ArtifactsDirectory)/drop/forecasterux-v0.2.0.tgz'
+        releaseName: statusupdates
+        overrideValues: 'image.tag=$(Build.BuildId),image.repository=$(imageRepo),ingress.hostname=$(hostname),ingress.enabled=true,ingress.tls=true,env=$(env),environment.cdn_env=$(env),memory.limit=$(memorylimit),ingress.secretName=$(secretName),api.base_uri=$(api-hostname),rabbitmq.host=$(rabbitmqhost),rabbitmq.port=$(rabbitmqport),rabbitmq.user=$(rabbitmquser),rabbitmq.pass=$(rabbitmqpwd)'
